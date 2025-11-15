@@ -40,6 +40,14 @@ struct SharedTelemetryData {
     uint8_t  carPosition;
     uint8_t  currentLapNum;
     bool     drsAllowed;
+    uint16_t rpm;
+    float    ersStore;
+    uint8_t  ersDeployMode;
+    uint8_t  tyresAgeLaps;       // Idade atual (o que tínhamos)
+    float    fuelRemainingLaps;
+    uint8_t  tyreLifeSpan;
+    uint16_t revLightsBitValue;  // <--- Linha NOVA (é uint16_t)
+    unsigned long lastRevLightsTimestamp;
 };
 
 SharedTelemetryData g_Telemetry = {0};
@@ -76,38 +84,58 @@ void vTask_TelemetryUDP(void *pvParameters) {
         uint8_t packetId = parser.read();
         
         // **CORREÇÃO 4:** Use o nome correto da variável (sem underscore)
-        if (packetId == 2 || packetId == 6) {
+        // Agora nós nos importamos com os pacotes 2, 6, 7 e 12
+        if (packetId == 2 || packetId == 6 || packetId == 7 || packetId == 12) {
             
             // --- INÍCIO DA SEÇÃO CRÍTICA ---
-            if (xSemaphoreTake(g_TelemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // Tenta pegar o Mutex, mas com paciência de 1ms
+            if (xSemaphoreTake(g_TelemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 
                 // Mutex obtido! Atualiza os dados globais.
                 if (packetId == 2) { 
                     // Pacote Lap Data
                     PacketLapData* p = parser.packetLapData();
-                    
-                    // **CORREÇÃO 2:** Use o getter PÚBLICO, não acesse o header PRIVADO.
                     uint8_t carIndex = p->m_playerCarIndex();
 
-                    // Acessa os dados como uma FUNÇÃO(carIndex)
                     g_Telemetry.currentLapTimeMS = p->m_lapData(carIndex).m_currentLapTimeInMS;
                     g_Telemetry.lastLapTimeMS = p->m_lapData(carIndex).m_lastLapTimeInMS;
                     g_Telemetry.sector1MS = p->m_lapData(carIndex).m_sector1TimeInMSPart;
                     g_Telemetry.sector2MS = p->m_lapData(carIndex).m_sector2TimeInMSPart;
                     g_Telemetry.carPosition = p->m_lapData(carIndex).m_carPosition;
                     g_Telemetry.currentLapNum = p->m_lapData(carIndex).m_currentLapNum;
+                    
 
                 } else if (packetId == 6) { 
                     // Pacote Car Telemetry
                     PacketCarTelemetryData* p = parser.packetCarTelemetryData();
-                    
-                    // **CORREÇÃO 2:** Use o getter PÚBLICO.
                     uint8_t carIndex = p->m_playerCarIndex();
 
-                    // Acessa os dados como uma FUNÇÃO(carIndex)
                     g_Telemetry.speed = p->m_carTelemetryData(carIndex).m_speed;
                     g_Telemetry.gear = p->m_carTelemetryData(carIndex).m_gear;
                     g_Telemetry.drsAllowed = (p->m_carTelemetryData(carIndex).m_drs == 1);
+                    g_Telemetry.rpm = p->m_carTelemetryData(carIndex).m_engineRPM; 
+                    g_Telemetry.revLightsBitValue = p->m_carTelemetryData(carIndex).m_revLightsBitValue;
+                    // **AQUI ESTÁ A CORREÇÃO**
+                    // Salva o "carimbo de data/hora" exato de quando lemos este dado
+                    g_Telemetry.lastRevLightsTimestamp = millis();
+                } else if (packetId == 7) {
+                    // Pacote Car Status
+                    PacketCarStatusData* p = parser.packetCarStatusData();
+                    uint8_t carIndex = p->m_playerCarIndex();
+                    
+                    g_Telemetry.ersStore = p->m_carStatusData(carIndex).m_ersStoreEnergy;
+                    g_Telemetry.ersDeployMode = p->m_carStatusData(carIndex).m_ersDeployMode;
+                    g_Telemetry.tyresAgeLaps = p->m_carStatusData(carIndex).m_tyresAgeLaps;
+                    g_Telemetry.fuelRemainingLaps = p->m_carStatusData(carIndex).m_fuelRemainingLaps;
+                    
+
+                } else if (packetId == 12) {
+                    // Pacote Tyre Set Data
+                    PacketTyreSetData* p = parser.packetTyreSetData();
+                    uint8_t carIndex = p->m_playerCarIndex();
+
+                    g_Telemetry.tyreLifeSpan = p->m_tyresetData(carIndex).m_lifeSpan;
+                    
                 }
                 
                 // Libera o Mutex
@@ -115,68 +143,158 @@ void vTask_TelemetryUDP(void *pvParameters) {
                 // --- FIM DA SEÇÃO CRÍTICA ---
 
             } else {
-                Serial.println("Task UDP: Mutex ocupado, dados do parser descartados.");
+                // Não precisa imprimir, só significa que o display estava ocupado
+                // e este pacote (antigo) será descartado.
             }
         }
         
+        // Cede o menor tempo possível para o escalonador
         vTaskDelay(pdMS_TO_TICKS(1));
 
     } // fim while(1)
 }
 
 // --- Definição da Task do Display (Core 0) ---
+
+// --- Definição da Task do Display (Core 0) ---
 void vTask_DisplayOLED(void *pvParameters) {
     Serial.println("Task OLED: Iniciando no Core 0...");
 
     SharedTelemetryData localTelemetry = {0};
-
-    // **CORREÇÃO 3:** Crie um array (buffer) de tamanho fixo.
-    // 64 bytes é mais que o suficiente para as linhas do display.
-    char format_buf[64]; 
+    char format_buf[64]; // Buffer para formatar strings
+    
+    const float MAX_ERS_JOULES = 4000000.0f; 
 
     TickType_t xLastWakeTime;
-    const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10 FPS
+    const TickType_t xFrequency = pdMS_TO_TICKS(16); // 30 FPS
     xLastWakeTime = xTaskGetTickCount();
 
     while (1) {
         // --- Parte 1: Aquisição Segura de Dados ---
-        if (xSemaphoreTake(g_TelemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (xSemaphoreTake(g_TelemetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             memcpy(&localTelemetry, &g_Telemetry, sizeof(SharedTelemetryData));
             xSemaphoreGive(g_TelemetryMutex);
+            
         } else {
             Serial.println("Task OLED: Mutex ocupado, renderizando dados antigos.");
         }
 
-        // --- Parte 2: Renderização (Lenta) ---
+        // --- Parte 2: Renderização (Layout V13 - Marcha Invertida) ---
         
-        u8g2.clearBuffer(); 
+        u8g2.clearBuffer();
         
-        // --- Linha 1: Velocidade e Marcha ---
-        u8g2.setFont(u8g2_font_ncenB10_tr); 
-        // **CORREÇÃO 3:** 'format_buf' agora é um buffer válido.
-        sprintf(format_buf, "Vel: %03d", localTelemetry.speed);
-        u8g2.drawStr(0, 12, format_buf);
-        
-        sprintf(format_buf, "M: %d", localTelemetry.gear);
-        u8g2.drawStr(90, 12, format_buf);
-
-        // --- Linha 2: Tempo de Volta ---
+        // --- Tempo da Última Volta (Canto Superior Esquerdo) ---
         u8g2.setFont(u8g2_font_ncenB08_tr); 
-        uint32_t t = localTelemetry.currentLapTimeMS;
+        uint32_t t = localTelemetry.lastLapTimeMS;
         int min = t / 60000;
         int sec = (t % 60000) / 1000;
         int ms = t % 1000;
-        sprintf(format_buf, "Volta: %d:%02d.%03d", min, sec, ms);
-        u8g2.drawStr(0, 30, format_buf);
+        sprintf(format_buf, "%d:%02d.%03d", min, sec, ms);
+        u8g2.drawStr(0, 10, format_buf);
+        
+        // --- Posição e Volta (Canto Superior Direito) ---
+        u8g2.setFont(u8g2_font_ncenB08_tr); 
+        sprintf(format_buf, "P%d V%d", localTelemetry.carPosition, localTelemetry.currentLapNum);
+        int pos_lap_width = u8g2.getStrWidth(format_buf);
+        u8g2.drawStr(128 - pos_lap_width - 2, 10, format_buf);
 
-        // --- Linha 3: Posição e Volta Atual ---
-        sprintf(format_buf, "Pos: %d / Lap: %d", localTelemetry.carPosition, localTelemetry.currentLapNum);
-        u8g2.drawStr(0, 44, format_buf);
+        
+        // --- Velocidade (Central, acima da Marcha) ---
+        u8g2.setFont(u8g2_font_ncenB12_tr); 
+        sprintf(format_buf, "%03d", localTelemetry.speed);
+        int speed_width = u8g2.getStrWidth(format_buf);
+        u8g2.drawStr((128 - speed_width) / 2, 20, format_buf);
 
-        // --- Linha 4: Tempos de Setor (Exemplo) ---
-        sprintf(format_buf, "S1: %d S2: %d", localTelemetry.sector1MS, localTelemetry.sector2MS);
-        u8g2.drawStr(0, 58, format_buf);
 
+        // --- Marcha (Central) ---
+        u8g2.setFont(u8g2_font_logisoso28_tr); 
+        
+        // Prepara o texto da marcha
+        if (localTelemetry.gear == -1) {
+            sprintf(format_buf, "R");
+        } else if (localTelemetry.gear == 0) {
+            sprintf(format_buf, "N");
+        } else {
+            sprintf(format_buf, "%d", localTelemetry.gear);
+        }
+        int gear_width = u8g2.getStrWidth(format_buf);
+        int gear_x = (128 - gear_width) / 2;
+
+        // **AQUI ESTÁ A CORREÇÃO FINAL**
+        // 1. Verifica se o dado é "novo" (menos de 100ms de idade)
+        unsigned long age = millis() - localTelemetry.lastRevLightsTimestamp;
+        bool showRevLight = (age < 100) && (localTelemetry.revLightsBitValue >= 2047) && (localTelemetry.rpm > 10000);
+
+        if (showRevLight) {
+            // INVERTIDO: Desenha uma caixa branca e texto preto
+            u8g2.drawBox(gear_x - 2, 26, gear_width + 4, 28); // Fundo branco
+            u8g2.setFontMode(0);    // Modo transparente
+            u8g2.setDrawColor(0);   // Texto PRETO
+            u8g2.drawStr(gear_x, 50, format_buf);
+            u8g2.setDrawColor(1);   // Reseta cor para BRANCO
+        } else {
+            // NORMAL: Desenha texto branco
+            u8g2.drawStr(gear_x, 50, format_buf);
+        }
+        // --- RPM (Central, abaixo da Marcha) ---
+        u8g2.setFont(u8g2_font_ncenB08_tr);
+        
+        // Lógica de inversão REMOVIDA daqui
+        sprintf(format_buf, "%d", localTelemetry.rpm); 
+        int rpm_width = u8g2.getStrWidth(format_buf);
+        int rpm_x = (128 - rpm_width) / 2;
+        u8g2.drawStr(rpm_x, 64, format_buf);
+        
+
+        // --- Nível de Bateria ERS (Barra à Esquerda) ---
+        u8g2.drawFrame(5, 12, 8, 42); 
+        float ersPercent = localTelemetry.ersStore / MAX_ERS_JOULES;
+        if (ersPercent > 1.0f) ersPercent = 1.0f;
+        if (ersPercent < 0.0f) ersPercent = 0.0f;
+        int barHeight = (int)(ersPercent * 40); 
+        if (barHeight > 0) {
+            u8g2.drawBox(6, (12 + 41) - barHeight, 6, barHeight);
+        }
+
+        
+        // --- Modo de ERS (Abaixo da barra de ERS) ---
+        u8g2.setFont(u8g2_font_ncenB08_tr);
+        const char* ersModeStr = "N/A"; 
+        switch (localTelemetry.ersDeployMode) {
+            case 1: ersModeStr = "MED"; break;
+            case 2: ersModeStr = "HL"; break;
+            case 3: ersModeStr = "OVT"; break;
+        }
+        u8g2.drawStr(4, 64, ersModeStr);
+
+        
+        // --- Dados (Meio Direito) - 3 linhas (Seu layout V12) ---
+        u8g2.setFont(u8g2_font_ncenB08_tr); 
+        
+        sprintf(format_buf, "t_age:%d", localTelemetry.tyresAgeLaps);
+        int tyre_age_width = u8g2.getStrWidth(format_buf);
+        u8g2.drawStr(128 - tyre_age_width - 2, 26, format_buf);
+
+        sprintf(format_buf, "t_left:%d", localTelemetry.tyreLifeSpan);
+        int tyre_life_width = u8g2.getStrWidth(format_buf);
+        u8g2.drawStr(128 - tyre_life_width - 2, 38, format_buf);
+
+        sprintf(format_buf, "fuel:%.1f", localTelemetry.fuelRemainingLaps);
+        int fuel_width = u8g2.getStrWidth(format_buf);
+        u8g2.drawStr(128 - fuel_width - 2, 50, format_buf);
+
+
+        // --- Sinalização DRS (Canto Inferior Direito) ---
+        if (localTelemetry.drsAllowed) {
+            u8g2.setFont(u8g2_font_ncenB10_tr); 
+            u8g2.drawBox(92, 52, 30, 12);
+            u8g2.setFontMode(0);
+            u8g2.setDrawColor(0);
+            u8g2.drawStr(94, 62, "DRS");
+            u8g2.setDrawColor(1);
+        }
+
+        // Envia o buffer renderizado para o display
         u8g2.sendBuffer();
 
         // --- Parte 3: Atraso Periódico ---
@@ -184,7 +302,6 @@ void vTask_DisplayOLED(void *pvParameters) {
         
     } // fim while(1)
 }
-
 // --- Função Setup (Executada uma vez no Core 1) ---
 void setup() {
     // **CORREÇÃO 1:** Removido 'parser->begin(20777);'
