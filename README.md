@@ -64,7 +64,7 @@ A montagem utiliza um ESP32 DevKit V1 comunicando-se com um display OLED SSD1306
 
 ### Fotos do Projeto
 
-![Foto da Montagem](img/mdisplay.png)
+![Foto da Montagem](img/display.png)
 ![Foto do Esquemático](img/schematic.png)
 
 ---
