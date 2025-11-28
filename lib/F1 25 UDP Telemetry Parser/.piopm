@@ -1,0 +1,1 @@
+{"type": "library", "name": "F1 25 UDP Telemetry Parser", "version": "1.0.0+sha.64b18a5", "spec": {"owner": null, "id": null, "name": "f1-25-udp", "requirements": null, "uri": "git+https://github.com/MacManley/f1-25-udp.git"}}
