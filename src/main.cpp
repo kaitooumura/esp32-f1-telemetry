@@ -4,9 +4,9 @@
 #include <TFT_eSPI.h> 
 #include <SPI.h>
 #include <esp_task_wdt.h> 
+#include <WiFiManager.h> // BIBLIOTECA DO PORTAL
 
-const char* WIFI_SSID = "HKHC-2G";
-const char* WIFI_PASS = "h14k04h09c12";
+// Nota: Não definimos SSID/Senha aqui. O chip vai lembrar.
 const int UDP_PORT = 20777; 
 
 TFT_eSPI tft = TFT_eSPI();
@@ -22,21 +22,18 @@ const int Y_GEAR  = 170;
 const int Y_RPM   = 290;  
 
 struct SharedTelemetryData {
-    // Básicos
     uint16_t speed;
     int8_t   gear;
     uint16_t rpm;
     uint16_t revLightsBitValue;  
     unsigned long lastRevLightsTimestamp;
 
-    // Tempos
     uint32_t currentLapTimeMS;
     uint32_t lastLapTimeMS;
     uint8_t  carPosition;
     uint8_t  currentLapNum;
     uint8_t  totalLaps;
     
-    // Carro
     float    ersStore;
     uint8_t  ersDeployMode;
     float    fuelRemainingLaps;
@@ -50,11 +47,9 @@ struct SharedTelemetryData {
     float    tyresWear[4];
     uint8_t  tyresTemp[4];
 
-    // --- SETORES (ATUAIS) ---
-    uint16_t currentS1, currentS2; 
+    uint16_t currentS1, currentS2;
     uint32_t historyS3;            
     
-    // --- RECORDES (PESSOAL + SESSÃO) ---
     uint32_t bestS1, bestS2, bestS3; 
     uint32_t sessionBestS1, sessionBestS2, sessionBestS3;
     
@@ -68,17 +63,34 @@ SemaphoreHandle_t g_TelemetryMutex;
 void vTask_TelemetryUDP(void *pvParameters);
 void vTask_DisplayTFT(void *pvParameters);
 
+// --- CALLBACK DO MODO DE CONFIGURAÇÃO ---
+// Isso aparece na tela quando o usuário precisa conectar no WiFi do ESP32
+void configModeCallback (WiFiManager *myWiFiManager) {
+    tft.fillScreen(TFT_BLUE);
+    tft.setTextColor(TFT_WHITE, TFT_BLUE);
+    tft.setTextDatum(MC_DATUM);
+    
+    tft.setTextSize(2);
+    tft.drawString("MODO CONFIGURACAO", CENTER_X, 50, 4);
+    
+    tft.setTextSize(1);
+    tft.drawString("1. Conecte no WiFi:", CENTER_X, 110, 4);
+    
+    tft.setTextColor(TFT_YELLOW, TFT_BLUE);
+    tft.drawString(myWiFiManager->getConfigPortalSSID(), CENTER_X, 150, 4); // Nome da rede (ex: F1_Dash)
+    
+    tft.setTextColor(TFT_WHITE, TFT_BLUE);
+    tft.drawString("2. Acesse: 192.168.4.1", CENTER_X, 200, 4);
+    tft.drawString("3. Configure seu WiFi", CENTER_X, 240, 4);
+}
+
 // --- Task de Rede ---
 void vTask_TelemetryUDP(void *pvParameters) {
+    // O WiFi já foi conectado no setup(), aqui só iniciamos o UDP
     esp_task_wdt_add(NULL);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status()!= WL_CONNECTED) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-        esp_task_wdt_reset();
-    }
+    
     parser.begin(UDP_PORT);
 
-    // Inicializa recordes com valor alto para poder baixar
     g_Telemetry.sessionBestS1 = 0xFFFFFFFF;
     g_Telemetry.sessionBestS2 = 0xFFFFFFFF;
     g_Telemetry.sessionBestS3 = 0xFFFFFFFF;
@@ -96,7 +108,6 @@ void vTask_TelemetryUDP(void *pvParameters) {
             } 
             else if (packetId == 1 || packetId == 2 || packetId == 6 || packetId == 7 || packetId == 10 || packetId == 11 || packetId == 12) {
                 if (xSemaphoreTake(g_TelemetryMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-                    
                     if (packetId == 1) { 
                         PacketSessionData* p = parser.packetSessionData();
                         g_Telemetry.totalLaps = p->m_totalLaps();
@@ -105,7 +116,6 @@ void vTask_TelemetryUDP(void *pvParameters) {
                     else if (packetId == 2) { 
                         PacketLapData* p = parser.packetLapData();
                         uint8_t c = p->m_playerCarIndex();
-                        
                         g_Telemetry.currentLapTimeMS = p->m_lapData(c).m_currentLapTimeInMS;
                         g_Telemetry.lastLapTimeMS = p->m_lapData(c).m_lastLapTimeInMS;
                         g_Telemetry.carPosition = p->m_lapData(c).m_carPosition;
@@ -141,10 +151,7 @@ void vTask_TelemetryUDP(void *pvParameters) {
                         for(int i=0; i<4; i++) g_Telemetry.tyresWear[i] = p->m_carDamageData(c).m_tyresWear[i];
                     }
                     else if (packetId == 11) { 
-                        // --- HISTÓRICO DE SESSÃO (PESSOAL E GLOBAL) ---
                         PacketSessionHistoryData* p = parser.packetSessionHistoryData();
-                        
-                        // 1. Extrai os melhores tempos deste carro (seja qual for)
                         uint32_t thisCarBestS1 = 0xFFFFFFFF;
                         uint32_t thisCarBestS2 = 0xFFFFFFFF;
                         uint32_t thisCarBestS3 = 0xFFFFFFFF;
@@ -165,18 +172,14 @@ void vTask_TelemetryUDP(void *pvParameters) {
                             thisCarBestS3 = (h.m_sector3TimeMinutes * 60000) + h.m_sector3TimeInMS;
                         }
 
-                        // 2. Atualiza o MELHOR DA SESSÃO (Roxo)
                         if (thisCarBestS1 < g_Telemetry.sessionBestS1) g_Telemetry.sessionBestS1 = thisCarBestS1;
                         if (thisCarBestS2 < g_Telemetry.sessionBestS2) g_Telemetry.sessionBestS2 = thisCarBestS2;
                         if (thisCarBestS3 < g_Telemetry.sessionBestS3) g_Telemetry.sessionBestS3 = thisCarBestS3;
 
-                        // 3. Se for o MEU carro, atualiza meus recordes (Verde) e pega o S3 da ultima volta
                         if (p->m_carIdx() == parser.packetCarStatusData()->m_playerCarIndex()) {
                             g_Telemetry.bestS1 = thisCarBestS1;
                             g_Telemetry.bestS2 = thisCarBestS2;
                             g_Telemetry.bestS3 = thisCarBestS3;
-
-                            // Pega o S3 da última volta completada para exibir
                             uint8_t currentLap = g_Telemetry.currentLapNum;
                             if (currentLap > 1) {
                                 int lastLapIndex = currentLap - 2; 
@@ -204,7 +207,7 @@ void vTask_TelemetryUDP(void *pvParameters) {
     } 
 }
 
-// --- Task de Display (V40 - Cores Corretas) ---
+// --- Task de Display (V41 - Layout Final) ---
 void vTask_DisplayTFT(void *pvParameters) {
     esp_task_wdt_add(NULL);
 
@@ -217,7 +220,7 @@ void vTask_DisplayTFT(void *pvParameters) {
     #define C_ACCENT TFT_CYAN
     #define C_WARN TFT_RED
     #define C_GOOD TFT_GREEN
-    #define C_PURPLE TFT_MAGENTA // Roxo
+    #define C_PURPLE TFT_MAGENTA 
     #define C_ORANGE TFT_ORANGE
     #define C_BLUE TFT_BLUE
 
@@ -236,7 +239,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         } 
         esp_task_wdt_reset();
 
-        // --- SAFETY CAR ---
         if (localTelemetry.safetyCarStatus != 0) {
             uint16_t scBgColor = C_GOOD; 
             if (localTelemetry.safetyCarDelta < 0) { 
@@ -258,7 +260,6 @@ void vTask_DisplayTFT(void *pvParameters) {
             continue; 
         }
         
-        // 1. CABEÇALHO
         tft.setTextColor(C_TXT, C_BG);
         tft.setTextSize(1);
         tft.setTextDatum(TL_DATUM); 
@@ -272,7 +273,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         tft.drawString(buf, 470, 10, 4);
         tft.setTextDatum(MC_DATUM); 
 
-        // 2. MARCHA
         unsigned long age = millis() - localTelemetry.lastRevLightsTimestamp;
         bool shiftNow = (age < 100) && (localTelemetry.revLightsBitValue >= 2047) && (localTelemetry.rpm > 11500);
         
@@ -296,7 +296,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         }
         esp_task_wdt_reset();
 
-        // 3. VELOCIDADE & RPM
         tft.setTextColor(C_ACCENT, C_BG); 
         tft.setTextSize(1); 
         sprintf(buf, "%03d", localTelemetry.speed);
@@ -311,7 +310,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         tft.drawString(buf, CENTER_X, Y_RPM, 4); 
         tft.setTextPadding(0);
 
-        // 4. ERS & COMBUSTÍVEL
         int barX = 15; int barY = 60; int barW = 25; int barH = 200;
         tft.drawRect(barX, barY, barW, barH, C_TXT);
         float ersPct = localTelemetry.ersStore / MAX_ERS_JOULES;
@@ -339,7 +337,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         tft.drawString(fuelMixStr, barX + 18, barY + barH + 45, 4);
         tft.setTextPadding(0);
 
-        // 5. PNEUS
         int tyreBoxX = 80; int tyreBoxY = 100;
         int tyreW = 25; int tyreH = 40; int gap = 5;
         int mapIdx[4] = {2, 3, 0, 1}; 
@@ -363,7 +360,6 @@ void vTask_DisplayTFT(void *pvParameters) {
         }
         esp_task_wdt_reset();
 
-        // 6. LATERAL DIREITA
         tft.setTextDatum(TR_DATUM); 
         tft.setTextColor(C_TXT, C_BG);
         tft.setTextSize(1); 
@@ -383,38 +379,31 @@ void vTask_DisplayTFT(void *pvParameters) {
         sprintf(buf, "%d:%02d.%03d", min, sec, ms);
         tft.drawString(buf, rightX, startY + (stepY * 3), 4);
 
-        // --- FUNÇÃO DE COR COM ROXO ---
-        auto getSectorColor = [&](uint32_t time, uint32_t pBest, uint32_t sBest) {
-            if (time == 0) return C_TXT;
-            if (sBest > 0 && time <= sBest) return C_PURPLE; // Roxo (Session)
-            if (pBest > 0 && time <= pBest) return C_GOOD;   // Verde (Pessoal)
-            return C_WARN; // Vermelho
-        };
-
-        // S1
         if (localTelemetry.currentS1 > 0) displayS1 = localTelemetry.currentS1;
+        auto getSectorColor = [&](uint32_t time, uint32_t best, uint32_t sBest) {
+            if (time == 0) return C_TXT;
+            if (sBest > 0 && time <= sBest) return C_PURPLE; 
+            if (best > 0 && time <= best) return C_GOOD;    
+            return C_WARN; 
+        };
         tft.setTextColor(getSectorColor(displayS1, localTelemetry.bestS1, localTelemetry.sessionBestS1), C_BG);
         sprintf(buf, "S1: %d.%03d", displayS1 / 1000, displayS1 % 1000);
         if (displayS1 == 0) sprintf(buf, "S1: --.---");
         tft.drawString(buf, rightX, startY + (stepY * 4), 4);
 
-        // S2
         if (localTelemetry.currentS2 > 0) displayS2 = localTelemetry.currentS2;
         tft.setTextColor(getSectorColor(displayS2, localTelemetry.bestS2, localTelemetry.sessionBestS2), C_BG);
         sprintf(buf, "S2: %d.%03d", displayS2 / 1000, displayS2 % 1000);
         if (displayS2 == 0) sprintf(buf, "S2: --.---");
         tft.drawString(buf, rightX, startY + (stepY * 5), 4);
 
-        // S3 (Corrigido com cores)
         uint32_t s3 = localTelemetry.historyS3;
         tft.setTextColor(getSectorColor(s3, localTelemetry.bestS3, localTelemetry.sessionBestS3), C_BG);
         sprintf(buf, "S3: %d.%03d", s3 / 1000, s3 % 1000);
         if (s3 == 0) sprintf(buf, "S3: --.---");
         tft.drawString(buf, rightX, startY + (stepY * 6), 4);
-        
         tft.setTextPadding(0);
 
-        // 7. DRS
         tft.setTextDatum(MC_DATUM); 
         int drsBoxX = 75; int drsBoxY = 270; int drsW = 80; int drsH = 40;
         if (localTelemetry.drsActive) {
@@ -439,30 +428,47 @@ void vTask_DisplayTFT(void *pvParameters) {
 
 void setup() {
     Serial.begin(115200); 
-    esp_task_wdt_init(30, true); 
-
+    
     tft.init();
     tft.setRotation(1); 
     tft.fillScreen(TFT_BLACK);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("Iniciando V40...", CENTER_X, CENTER_Y, 4);
+
+    // --- WIFIMANAGER: PORTAL DE CONFIGURAÇÃO ---
+    // Configura o botão BOOT (GPIO 0) para resetar
+    pinMode(0, INPUT_PULLUP);
     
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(100);
-        esp_task_wdt_reset();
+    if (digitalRead(0) == LOW) {
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.setTextDatum(MC_DATUM);
+        tft.drawString("RESETANDO WIFI...", CENTER_X, CENTER_Y, 4);
+        WiFiManager wm;
+        wm.resetSettings();
+        delay(2000);
+        ESP.restart();
+    }
+
+    WiFiManager wm;
+    wm.setAPCallback(configModeCallback);
+    
+    if (!wm.autoConnect("F1_Dashboard_Setup")) {
+        Serial.println("Falha ao conectar.");
+        ESP.restart();
     }
 
     tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
     tft.drawString("WiFi OK!", CENTER_X, CENTER_Y - 20, 4);
     tft.drawString(WiFi.localIP().toString(), CENTER_X, CENTER_Y + 20, 4);
+    
+    esp_task_wdt_init(30, true); 
+    
     delay(3000);
     tft.fillScreen(TFT_BLACK);
 
     g_TelemetryMutex = xSemaphoreCreateMutex(); 
     xTaskCreatePinnedToCore(vTask_TelemetryUDP, "Task_UDP", 8192, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(vTask_DisplayTFT, "Task_TFT_V40", 8192, NULL, 1, NULL, 0); 
+    xTaskCreatePinnedToCore(vTask_DisplayTFT, "Task_TFT_V42", 8192, NULL, 1, NULL, 0); 
 }
 
 void loop() { 
