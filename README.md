@@ -1,91 +1,111 @@
-# Projeto de Telemetria F1 25 com ESP32 e RTOS
+# Projeto de Telemetria F1 25 com ESP32 e FreeRTOS
 
 **SEL0337 - PROJETOS EM SISTEMAS EMBARCADOS**
 **Prática 6: Introdução aos Sistemas Operacionais de Tempo Real (RTOS)**
+**Prática 5: Controle de Versão com Git e GitHub**
 
-- **Aluno:** Heitor Kaito Oumura        
-- **Nº USP:** 13828101
-- **Aluno:** Gabriel Breda Coelho       
+- **Aluno:** Gabriel Breda Coelho
 - **Nº USP:** 14746360
+- **Aluno:** Heitor Kaito Oumura
+- **Nº USP:** 13828101
+
 ---
 
 ## 1. Resumo do Projeto
 
-Este projeto implementa um display de telemetria em tempo real para o jogo F1 25. O sistema é centralizado em um microcontrolador ESP32, que se conecta à rede Wi-Fi local para receber pacotes de dados UDP enviados pelo jogo.
+Este projeto consiste em um dashboard de telemetria profissional para o simulador F1 25, desenvolvido em um microcontrolador ESP32. Este projeto utiliza um display TFT LCD de 3.5" colorido para exibir dados de engenharia e pilotagem em tempo real.
 
-Utilizando o sistema operacional de tempo real FreeRTOS, o projeto gerencia de forma eficiente duas tarefas concorrentes para processar e exibir os dados, demonstrando conceitos-chave de sistemas embarcados, multitarefa e sincronização.
+O sistema conecta-se à rede Wi-Fi para interceptar pacotes UDP enviados pelo jogo e exibe informações críticas para o piloto. O projeto é o usa FreeRTOS para garantir a integridade dos dados e a implementação de um algoritmo de "Limpeza de Fila" (Anti-Lag) que assegura latência zero na exibição.
 
-As informações exibidas no display OLED incluem:
--Velocidade atual
--Marcha atual
--Tempo da volta atual
--Posição na corrida
--E outros dados de telemetria...
+### Funcionalidades do Display
+### Dados de Pilotagem
+* **Marcha Central:** Indicador com lógica de inversão de cor (Fundo Vermelho/Texto Preto) no momento exato da troca de marcha, sincronizado com os LEDs do volante dentro do simulador.
+* **Velocidade & RPM:** Atualização em tempo real.
+* **DRS (Drag Reduction System):** Indicador inteligente com dois estados:
+    * *Contorno Laranja:* DRS Disponível (Zona de ativação).
+    * *Fundo Verde:* DRS Ativo (Asa aberta).
 
-## 2. Conceitos da Prática 6 (RTOS) Implementados
+### Estratégia e Engenharia
+* **Pneus Térmicos:** 4 barras independentes que mostram visualmente:
+    * *Desgaste:* A barra diminui conforme a vida útil do pneu cai (lógica de "bateria").
+    * *Temperatura:* A cor muda dinamicamente (Azul = Frio, Verde = Ideal, Vermelho = Superaquecimento).
+* **ERS (Bateria):** Barra gráfica de nível e modo da bateria (MED, HOT, OVT).
+* **Combustível:** Indicador de voltas restantes e da mistura (Fuel Mix).
 
-Este projeto atende a todos os requisitos da prática, demonstrando o uso avançado do FreeRTOS para gerenciar tarefas concorrentes.
+### Alertas de Pista
+* **Safety Car (SC/VSC):** Quando um Safety Car é acionado, o dashboard muda para um modo de **"Overlay de Prioridade"**, cobrindo a tela com um fundo colorido e mostrando apenas o delta (diferença de tempo) que o piloto deve manter.
+* **Setores:** Comparação em tempo real dos tempos de setor (S1, S2, S3) com o melhor tempo pessoal da sessão (Verde/Vermelho).
 
-### Multitarefa e Processamento Multinúcleo
-
-O sistema é dividido em duas tarefas principais, cada uma fixada em um núcleo do processador dual-core do ESP32 para garantir performance e previsibilidade:
-
-* `vTask_TelemetryUDP` (**Núcleo 1**, **Prioridade 5 - Alta**):
-    * Responsável por toda a comunicação de rede.
-    * Gerencia a conexão Wi-Fi e "ouve" a porta UDP (20777) esperando por pacotes do jogo.
-    * Ao receber um pacote, ela adquire o mutex e atualiza a estrutura de dados global `g_Telemetry`.
-    * Foi definida como alta prioridade para garantir que nenhum pacote UDP seja perdido (é uma tarefa de Entrada/Saída crítica).
-
-* `vTask_DisplayOLED` (**Núcleo 0**, **Prioridade 1 - Baixa**):
-    * Responsável por toda a interface com o usuário.
-    * Executa em um loop periódico (controlado por `vTaskDelayUntil`) para atualizar o display OLED a uma taxa constante (10 FPS).
-    * Antes de desenhar na tela, ela adquire o mutex e faz uma cópia local dos dados da `g_Telemetry` para exibir.
-    * Foi definida como baixa prioridade, pois uma pequena variação na taxa de atualização do display não é crítica para o sistema.
-
-### Sincronização com Mutex (Exclusão Mútua)
-
-O recurso mais crítico deste projeto é a variável global `SharedTelemetryData g_Telemetry`, que é compartilhada entre as duas tarefas. Para evitar uma condição de corrida, foi implementado um Mutex (`g_TelemetryMutex`).
-
-O Mutex (Mutual Exclusion) garante que apenas uma tarefa possa acessar a variável `g_Telemetry` de cada vez, assegurando a integridade e consistência dos dados em todo o sistema.
 
 ---
 
-## 3. Diagrama Esquemático e Montagem
+## 2. Arquitetura de Software e RTOS
 
-A montagem utiliza um ESP32 DevKit V1 e um display OLED de 0.96" (SH1106) conectado via interface SPI.
+O sistema utiliza o FreeRTOS para gerenciar duas tarefas concorrentes em núcleos distintos do ESP32, otimizando o processamento paralelo.
 
-### Diagrama Esquemático
+### Tarefas (Tasks)
+1.  **`vTask_TelemetryUDP` (Core 1 - Prioridade 5):**
+    * Responsável pela recepção de pacotes UDP.
+    * **Estratégia Anti-Lag:** Implementação de um loop que processa todos os pacotes acumulados no buffer de rede antes de ceder tempo à CPU. Isso evita o "efeito fila" e garante que o dado exibido seja sempre o mais recente.
+    * Utiliza Timestamp (`millis()`) para marcar a chegada de dados críticos, permitindo identificar se a conexão caiu ou se o jogo foi pausado.
 
-*[INSIRA AQUI UMA IMAGEM DO SEU DIAGRAMA ESQUEMÁTICO (Fritzing ou rascunho)]*
-### Foto da Montagem Prática
-![alt text](image.png)
----
+2.  **`vTask_DisplayOLED` (Core 0 - Prioridade 1):**
+    * Responsável pela atualização do display LCD.
+    * Devido ao tempo de desenho do LCD, o *Task Watchdog Timer* do ESP32 tendia a reiniciar o sistema. Implementamos uma gestão manual do WDT (`esp_task_wdt_reset`) em pontos estratégicos do loop de renderização para garantir estabilidade sem travar o processador.
+    * Verifica a "idade" dos dados (timestamp) para apagar indicadores (como a luz de troca de marcha) caso o jogo pare de enviar dados por mais de 100ms.
 
-## 4. Funcionamento e Resultados
-
-O sistema foi capaz de receber e exibir os dados de telemetria do F1 25 com sucesso. A configuração do jogo necessária é:
-
-* **Formato UDP:** 2025
-* **Porta UDP:** 20777
-* **Endereço IP UDP:** [O IP do seu ESP32]
-* **Taxa de Envio:** 60Hz
-
-### Vídeo de Funcionamento
-
-*[INSIRA AQUI O LINK PARA UM VÍDEO DO PROJETO FUNCIONANDO COM O JOGO]*
-
-### Fotos do Display em Ação
-
-*[INSIRA AQUI FOTOS DO DISPLAY MOSTRANDO A TELEMETRIA EM TEMPO REAL]*
+### Sincronização (Mutex)
+Foi utilizado um Semáforo Mutex (`g_TelemetryMutex`) para proteger a estrutura de dados global `g_Telemetry`.
+* A tarefa de rede (Alta Prioridade) adquire o Mutex para **escrever** os dados novos.
+* A tarefa de display (Baixa Prioridade) adquire o Mutex para **ler** os dados e fazer uma cópia local.
+* Isso garante a atomicidade das operações e previne condições de corrida (leitura de dados corrompidos).
 
 ---
 
-## 5. Diferença: Tasks (RTOS) vs. Threads/Processos (Linux)
+## 3.  Hardware e Conexões
 
-Conforme solicitado, a principal diferença entre as **Tasks** do FreeRTOS e os **Processos/Threads** de um S.O. de propósito geral (como o Linux) é o **determinismo e o scheduler**.
+* **Microcontrolador:** ESP32 DevKit V1
+* **Display:** 3.5" TFT LCD (Driver ST7796S)
+* **Protocolo:** SPI
 
-* **Processos (Linux):** São "pesados" e possuem espaços de memória completamente isolados. A troca de contexto é lenta.
-* **Threads (Linux):** São "leves" e compartilham o mesmo espaço de memória de um processo. A troca é mais rápida, mas o *scheduler* do Linux é projetado para **equidade** e **throughput** (processar o máximo de coisas ao longo do tempo), sem garantias estritas de *quando* uma thread específica irá rodar.
-* **Tasks (FreeRTOS):** São extremamente "leves" e compartilham memória (como threads). A diferença fundamental é o **scheduler preemptivo baseado em prioridade estrita**. O FreeRTOS *garante* que, a qualquer momento, a tarefa de maior prioridade que está pronta para rodar **irá rodar imediatamente**, mesmo que isso signifique "fazer esperar" tarefas de prioridade mais baixa.
+### Pinagem (SPI VSPI)
+Pino LCD -> Pino ESP32 
+VCC -> VIN
+BL -> VIN
+GND -> GND
+CS -> GPIO5
+RESET -> GPIO17
+DC -> GPIO16
+MOSI -> GPIO23
+SCK -> GPIO18
 
-Em resumo, o Linux é otimizado para *performance média*, enquanto o FreeRTOS é otimizado para **determinismo** e **cumprimento de prazos** (real-time), o que é essencial para este projeto, onde perder um pacote UDP (tarefa de alta prioridade) é mais crítico do que atrasar um frame do display (tarefa de baixa prioridade).
+
+
+### Fotos do Projeto
+
+![Foto da Montagem](img/monatagem1.jpg)
+![Projeto em Execução](img/montagem2.jpg)
+
+---
+
+## 4. Diferença: Tasks (RTOS) vs. Threads (Linux)
+
+* **Determinismo:** No FreeRTOS, o escalonador garante que a tarefa de maior prioridade (UDP) rode imediatamente quando necessário, garantindo o cumprimento de prazos (Hard/Firm Real-Time). No Linux (OS de propósito geral), o escalonador foca em throughput médio, sem garantias estritas de tempo de resposta.
+* **Gerenciamento:** As Tasks do FreeRTOS são extremamente leves e rodam em um único espaço de endereçamento de memória, permitindo troca de contexto muito rápida, essencial para microcontroladores.
+
+---
+
+## 5. Como Executar
+
+O projeto conta com um Portal de Configuração (WiFiManager), permitindo que funcione em qualquer rede Wi-Fi sem mudar o código.
+
+1.  **Primeiro Uso:** Ao ligar, se o ESP32 não encontrar uma rede conhecida, ele criará um Ponto de Acesso WIFI chamado "F1_Dashboard_Setup".
+2.  **Configuração:** Conecte-se a essa rede com o celular, siga as instruções na tela do display, insira o SSID e Senha da sua casa. O ESP32 salvará e reiniciará.
+3.  **No Jogo (F1 25):**
+    * Vá em Configurações -> Telemetria.
+    * **UDP Telemetry:** Ligado.
+    * **IP Address:** (O IP que aparece na tela do LCD ao ligar).
+    * **Port:** 20777.
+    * **Send Rate:** 60Hz.
+    * **Format:** 2025.
+
