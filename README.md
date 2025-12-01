@@ -83,7 +83,7 @@ SCK -> GPIO18
 
 ### Fotos do Projeto
 
-![Foto da Montagem](img/monatagem1.jpg)
+![Foto da Montagem](img/montagem1.jpg)
 ![Projeto em Execução](img/montagem2.jpg)
 
 ---
